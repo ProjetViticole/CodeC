@@ -64,7 +64,7 @@ const int AIR_SEUIL = 600;       // valeur analogique du capteur air
 
 // ---------- Minuterie pour envoi régulier ----------
 unsigned long lastSend = 0;
-const unsigned long interval = 10 * 60 * 1000; // 10 minutes en ms
+const unsigned long interval = 1 * 60 * 1000; // 10 minutes en ms
 
 // ---------- Connexion Wi-Fi ----------
 void connectToWiFi() {
@@ -119,75 +119,89 @@ void loop() {
   if (!mqtt_client.connected()) connectToMQTT();
   mqtt_client.loop();
 
-  // Lecture des capteurs toutes les 5 sec
-  float temperature = dht.readTemperature();
-  float humidity = dht.readHumidity();
-  int airRaw = airSensor.getValue();
-  int airQuality = airSensor.slope();
-
-  // Affichage console
-  Serial.print("Temp: ");
-  Serial.print(temperature);
-  Serial.print(" °C | Hum: ");
-  Serial.print(humidity);
-  Serial.print(" % | Air: ");
-  Serial.println(airRaw);
-
-  // Vérifie s'il faut envoyer les données
+  static unsigned long lastRead = 0;
+  static const unsigned long readInterval = 5000; // lecture toutes les 5 sec
   unsigned long now = millis();
-  bool tempsEcoule = now - lastSend >= interval;
 
-  bool humidityValide = !isnan(humidity);
-  bool temperatureValide = !isnan(temperature);
+  if (now - lastRead >= readInterval) {
+    lastRead = now;
 
-  bool seuilDepasse = (
-    (temperatureValide && temperature > TEMP_SEUIL) ||
-    airRaw > AIR_SEUIL ||
-    (humidityValide && (humidity < 20 || humidity > 80))
-  );
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    int airRaw = airSensor.getValue();
+    int airQuality = airSensor.slope();
+    float airPPM = airRaw * 1.5; // estimation ppm après avoir airRaw
 
-  if (tempsEcoule || seuilDepasse) {
-    lastSend = now; // mise à jour du timer
+    Serial.print("Temp: ");
+    Serial.print(temperature);
+    Serial.print(" °C | Hum: ");
+    Serial.print(humidity);
+    Serial.print(" % | Air: ");
+    Serial.println(airRaw);
 
-    // Envoi température
-    if (!isnan(temperature)) {
-      String payload = "temperature,device=esp32 value=" + String(temperature);
-      mqtt_client.publish(topic_temp, payload.c_str());
-      Serial.println("📤 Température envoyée");
+    bool humidityValide = !isnan(humidity);
+    bool temperatureValide = !isnan(temperature);
+
+    bool seuilDepasse = (
+      (temperatureValide && temperature > TEMP_SEUIL) ||
+      airRaw > AIR_SEUIL ||
+      (humidityValide && (humidity < 20 || humidity > 80))
+    );
+
+    if ((now - lastSend >= interval) || seuilDepasse) {
+      lastSend = now;
+
+      if (temperatureValide) {
+        String payload = "temperature,device=esp32 value=" + String(temperature, 2);
+        mqtt_client.publish(topic_temp, payload.c_str());
+        Serial.println("📤 Température envoyée");
+      }
+
+      if (humidityValide) {
+        String payload = "humidity,device=esp32 value=" + String(humidity, 2);
+        mqtt_client.publish(topic_hum, payload.c_str());
+        Serial.println("📤 Humidité envoyée");
+      }
+
+      String airDesc;
+      if (airQuality == AirQualitySensor::FORCE_SIGNAL) {
+        airDesc = "Pollution sévère";
+      } else if (airQuality == AirQualitySensor::HIGH_POLLUTION) {
+        airDesc = "Pollution élevée";
+      } else if (airQuality == AirQualitySensor::LOW_POLLUTION) {
+        airDesc = "Pollution faible";
+      } else if (airQuality == AirQualitySensor::FRESH_AIR) {
+        airDesc = "Air frais";
+      } else {
+        airDesc = "Indéterminé";
+      }
+
+      String payload = "air_quality,device=esp32 value=" + String(airRaw, 2) +
+                       ",ppm=" + String(airPPM, 2) +
+                       ",description=\"" + airDesc + "\"";
+      mqtt_client.publish(topic_air, payload.c_str());
+      Serial.println("📤 Qualité de l'air envoyée : " + airDesc);
+
+      if (seuilDepasse) {
+        Serial.println("⚠️ Seuil dépassé ! Envoi anticipé effectué.");
+      }
     }
 
-    // Envoi humidité
-    if (!isnan(humidity)) {
-      String payload = "humidity,device=esp32 value=" + String(humidity);
-      mqtt_client.publish(topic_hum, payload.c_str());
-      Serial.println("📤 Humidité envoyée");
+    // Description qualité d'air
+    if (airQuality == AirQualitySensor::FORCE_SIGNAL) {
+      Serial.println("💨 Pollution sévère !");
+    } else if (airQuality == AirQualitySensor::HIGH_POLLUTION) {
+      Serial.println("🌫️ Pollution élevée");
+    } else if (airQuality == AirQualitySensor::LOW_POLLUTION) {
+      Serial.println("🌤️ Pollution faible");
+    } else if (airQuality == AirQualitySensor::FRESH_AIR) {
+      Serial.println("🍃 Air frais");
+    } else {
+      Serial.println("❓ Qualité d'air indéterminée");
     }
 
-    // Envoi air
-    String payload = "air_quality,device=esp32 value=" + String(airRaw);
-    mqtt_client.publish(topic_air, payload.c_str());
-    Serial.println("📤 Qualité de l'air envoyée");
-
-    // Notification si seuil
-    if (seuilDepasse) {
-      Serial.println("⚠️ Seuil dépassé ! Envoi anticipé effectué.");
-    }
+    Serial.println("-----------------------------");
   }
-
-  // Description de l’air
- if (airQuality == AirQualitySensor::FORCE_SIGNAL) {
-  Serial.println("💨 Pollution sévère !");
-} else if (airQuality == AirQualitySensor::HIGH_POLLUTION) {
-  Serial.println("🌫️ Pollution élevée");
-} else if (airQuality == AirQualitySensor::LOW_POLLUTION) {
-  Serial.println("🌤️ Pollution faible");
-} else if (airQuality == AirQualitySensor::FRESH_AIR) {
-  Serial.println("🍃 Air frais");
-} else {
-  Serial.println("❓ Qualité d'air indéterminée");
 }
 
 
-  Serial.println("-----------------------------");
-  delay(5000); // continue de lire toutes les 5 sec
-}
